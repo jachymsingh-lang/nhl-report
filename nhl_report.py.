@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Puck Morning Report: ranní e-mail o Češích a Slovácích v NHL. Zdarma, bez AI."""
+"""Puck Morning Report: ranní e-mail o Češích a Slovácích v NHL."""
 import datetime as dt
 import html as _html
 import os
