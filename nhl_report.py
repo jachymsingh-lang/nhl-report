@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""NHL Agent: ranní e-mail o Češích a Slovácích v NHL (odesílání přes Resend)."""
+"""NHL Agent: e-mail o Češích a Slovácích v NHL (odesílání přes Resend)."""
 import datetime as dt
 import html as _html
 import os
+import re
 import sys
 from zoneinfo import ZoneInfo
 
@@ -30,6 +31,24 @@ CZ = {
     'Ondrej Kase': 'Ondřej Kaše', 'Roman Cervenka': 'Roman Červenka', 'Marko Dano': 'Marko Daňo',
 }
 FLAG = {"SVK": "🇸🇰", "CZE": "🇨🇿"}
+
+TEAMS = {
+    "ANA": "Anaheim Ducks", "BOS": "Boston Bruins", "BUF": "Buffalo Sabres", "CGY": "Calgary Flames",
+    "CAR": "Carolina Hurricanes", "CHI": "Chicago Blackhawks", "COL": "Colorado Avalanche",
+    "CBJ": "Columbus Blue Jackets", "DAL": "Dallas Stars", "DET": "Detroit Red Wings",
+    "EDM": "Edmonton Oilers", "FLA": "Florida Panthers", "LAK": "Los Angeles Kings",
+    "MIN": "Minnesota Wild", "MTL": "Montréal Canadiens", "NSH": "Nashville Predators",
+    "NJD": "New Jersey Devils", "NYI": "New York Islanders", "NYR": "New York Rangers",
+    "OTT": "Ottawa Senators", "PHI": "Philadelphia Flyers", "PIT": "Pittsburgh Penguins",
+    "SJS": "San Jose Sharks", "SEA": "Seattle Kraken", "STL": "St. Louis Blues",
+    "TBL": "Tampa Bay Lightning", "TOR": "Toronto Maple Leafs", "UTA": "Utah Mammoth",
+    "VAN": "Vancouver Canucks", "VGK": "Vegas Golden Knights", "WSH": "Washington Capitals",
+    "WPG": "Winnipeg Jets",
+}
+
+
+def tn(abbr):
+    return TEAMS.get(abbr, abbr)
 
 
 def nm(n):
@@ -61,6 +80,21 @@ def season_id(game_date):
     d = dt.date.fromisoformat(game_date)
     y = d.year if d.month >= 9 else d.year - 1
     return f"{y}{y + 1}"
+
+
+def num(x):
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def gol(n):
+    return "gól" if n == 1 else ("góly" if 2 <= n <= 4 else "gólů")
+
+
+def bod(n):
+    return "bod" if n == 1 else ("body" if 2 <= n <= 4 else "bodů")
 
 
 def season_maps(game_date):
@@ -224,37 +258,99 @@ def upcoming_players(next_date, rs, rg):
     return out
 
 
-def article(game_date, cards, rows, not_played):
-    out = []
+# ----------------------------- TEXT A ZAJÍMAVOSTI -----------------------------
+
+
+def team_abbr(x):
+    t = x.get("teamAbbrev")
+    if isinstance(t, dict):
+        t = t.get("default")
+    return t or ""
+
+
+def facts_for(games):
+    """Zajímavosti spočítané z dat té noci (oficiální rekordy a milníky NHL API neposkytuje)."""
+    facts, scorer = [], {}
+    best_g, best_t = None, -1
+    big_g, big_m = None, -1
+    ot, so, shut = [], [], []
+
+    for g in games:
+        if g.get("gameState") not in ("OFF", "FINAL"):
+            continue
+        a, h = g["awayTeam"], g["homeTeam"]
+        sa, sh = a.get("score") or 0, h.get("score") or 0
+        line = f'{tn(a["abbrev"])} {sa}:{sh} {tn(h["abbrev"])}'
+        if sa + sh > best_t:
+            best_t, best_g = sa + sh, line
+        if abs(sa - sh) > big_m:
+            big_m, big_g = abs(sa - sh), g
+        lpt = (g.get("gameOutcome") or {}).get("lastPeriodType")
+        if lpt == "OT":
+            ot.append(line)
+        elif lpt == "SO":
+            so.append(line)
+        if sa == 0 or sh == 0:
+            w, l = (h, a) if sa == 0 else (a, h)
+            shut.append(f'{tn(w["abbrev"])} – {tn(l["abbrev"])} {max(sa, sh)}:0')
+        for x in g.get("goals", []):
+            key = ((x.get("name") or {}).get("default", ""), team_abbr(x))
+            scorer[key] = scorer.get(key, 0) + 1
+
+    for (name, team), c in scorer.items():
+        if c >= 3:
+            facts.append(f"🎩 **Hattrick:** {name} ({tn(team)}), {c} {gol(c)}")
+    twos = [f"{name} ({tn(team)})" for (name, team), c in scorer.items() if c == 2]
+    if twos:
+        facts.append("🔥 **Dva góly:** " + ", ".join(twos[:4]))
+    if big_g is not None and big_m >= 4:
+        a, h = big_g["awayTeam"], big_g["homeTeam"]
+        sa, sh = a.get("score") or 0, h.get("score") or 0
+        w, l = (a, h) if sa > sh else (h, a)
+        facts.append(f'💥 **Největší rozdíl:** {tn(w["abbrev"])} porazil {tn(l["abbrev"])} o **{big_m} {gol(big_m)}**')
+    if best_g and best_t >= 8:
+        facts.append(f"🎯 **Nejvíc gólů:** {best_g} ({best_t} {gol(best_t)})")
+    for s in shut:
+        facts.append(f"🧱 **Čisté konto:** {s}")
+    for s in ot:
+        facts.append(f"⏱️ **Prodloužení:** {s}")
+    for s in so:
+        facts.append(f"🥅 **Nájezdy:** {s}")
+    return facts[:5]
+
+
+def article(game_date, games, cards, rows, not_played):
     n = len(cards)
     word = "zápas" if n == 1 else ("zápasy" if n < 5 else "zápasů")
-    res = ", ".join(f'{c["away"]} {c["as"]}:{c["hs"]} {c["home"]}' + (f' ({c["ext"]})' if c["ext"] else "") for c in cards)
-    out.append(f"V noci na {cz_date(game_date)} se v NHL hrálo {n} {word}. Výsledky (hosté první): {res}.")
+    total = sum((g["awayTeam"].get("score") or 0) + (g["homeTeam"].get("score") or 0) for g in games)
+    out = [f"V noci na {cz_date(game_date)} se v NHL hrálo **{n} {word}** a padlo **{total} {gol(total)}**."]
 
     skaters = [r for r in rows if not r["goalie"]]
     goalies = [r for r in rows if r["goalie"]]
+    scorers = [r for r in skaters if isinstance(r["b"], int) and r["b"] > 0]
 
-    def line(r):
-        w = "výhra" if r["win"] else "prohra"
-        return (f'{r["name"]} ({r["team"]} vs {r["opp"]}, {r["res"]}, {w}): {r["g"]} G, {r["a"]} A, '
-                f'{r["b"]} B, +/- {r["pm"]}, {r["shots"]} střel, čas na ledě {r["toi"]}, v sezóně {r["season"]}')
+    if scorers:
+        b = scorers[0]
+        out.append(f'Nejlepší z Čechů a Slováků: **{b["name"]}** ({tn(b["team"])}), '
+                   f'**{b["b"]} {bod(b["b"])}** ({b["g"]}+{b["a"]}), v sezóně **{b["season"]}**.')
+        if len(scorers) > 1:
+            more = ", ".join(f'**{r["name"]}** ({r["b"]})' for r in scorers[1:])
+            out.append(f"Bodovali také: {more}.")
+    elif skaters:
+        out.append("Žádný Čech ani Slovák v poli nebodoval.")
+    else:
+        out.append("Žádný Čech ani Slovák v noci nenastoupil.")
 
-    if skaters:
-        out.append("Nejlepší výkon Čecha nebo Slováka: " + line(skaters[0]) + ".")
-    if len(skaters) > 1:
-        out.append("Další Češi a Slováci: " + "; ".join(line(r) for r in skaters[1:]) + ".")
     for r in goalies:
         w = "výhra" if r["win"] else "prohra"
-        out.append(f'Brankář {r["name"]} ({r["team"]} vs {r["opp"]}, {r["res"]}, {w}): {r["shots"]}, odchytal {r["toi"]}, v sezóně {r["season"]}.')
-    if not rows:
-        out.append("Žádný Čech ani Slovák v noci nenastoupil.")
+        out.append(f'Brankář **{r["name"]}** ({tn(r["team"])}): {r["shots"]}, {w}.')
     if not_played:
-        out.append("Do hry nezasáhli: " + ", ".join(not_played) + ".")
-    return out
+        out.append(f"Nenastoupilo dalších **{len(not_played)}** Čechů a Slováků.")
+    return out, facts_for(games)
 
 
 def compact_text(game_date, rows, upcoming):
-    head = f"🏒 NHL ranní report — {cz_date(game_date)}"
+    head = f"🏒 NHL report — {cz_date(game_date)}"
     if not rows:
         text = head + "\n\n📊 Češi a Slováci v noci nehráli."
     else:
@@ -269,31 +365,58 @@ def compact_text(game_date, rows, upcoming):
         today_lines = []
         for u in upcoming:
             names = ", ".join(f'{x["name"]} ({x["team"]})' for x in u["players"])
-            today_lines.append(f'• {u["away"]} @ {u["home"]}: {names}')
+            today_lines.append(f'• {tn(u["away"])} @ {tn(u["home"])}: {names}')
         text += "\n\n📅 Dnes hrají:\n" + "\n".join(today_lines)
     return text
 
 
-def to_html(game_date, paras, cards, rows, compact, upcoming):
+# ----------------------------- VZHLED E-MAILU -----------------------------
+
+
+def to_html(game_date, paras, facts, cards, rows, upcoming, stats):
     e = lambda s: _html.escape(str(s if s is not None else ""))
-    C = dict(bg="#0b1220", card="#111a2e", line="#1f2b45", text="#e6ecf5", mute="#8a9bb8", acc="#38bdf8", win="#22c55e", loss="#ef4444")
+    C = dict(bg="#0b1220", card="#111a2e", line="#1f2b45", text="#e6ecf5", mute="#8a9bb8",
+             acc="#38bdf8", win="#22c55e", loss="#ef4444", gold="#fbbf24")
 
-    ps = "".join(f'<p style="margin:0 0 14px;line-height:1.6;color:{C["text"]};font-size:15px;">{e(p)}</p>' for p in paras)
+    def fmt(t):
+        return re.sub(r"\*\*(.+?)\*\*", r'<b style="color:#ffffff;">\1</b>', e(t))
 
-    cs = []
-    for c in cards:
-        cs.append(
-            f'<td style="padding:6px;vertical-align:top;width:50%;"><div style="background:{C["bg"]};border:1px solid {C["line"]};border-radius:10px;padding:12px;">'
-            f'<div style="font-size:11px;color:{C["win"]};text-transform:uppercase;">{e(c["status"])}</div>'
-            f'<div style="font-size:11px;color:{C["mute"]};margin-bottom:8px;">{e(c["time"])} (Praha)</div>'
-            f'<table width="100%" style="border-collapse:collapse;font-size:18px;font-weight:700;color:{C["text"]};">'
-            f'<tr><td>{e(c["away"])}</td><td align="right">{e(c["as"])}</td></tr>'
-            f'<tr><td>{e(c["home"])}</td><td align="right">{e(c["hs"])}</td></tr></table>'
-            f'<div style="font-size:12px;color:{C["mute"]};margin-top:8px;">{e(c["scorers"])}</div></div></td>')
-    grid = ""
-    for i in range(0, len(cs), 2):
-        grid += "<tr>" + cs[i] + (cs[i + 1] if i + 1 < len(cs) else '<td style="width:50%;"></td>') + "</tr>"
+    d = cz_date(game_date)
 
+    def sec(title, inner, color=None):
+        color = color or C["acc"]
+        return (f'<tr><td style="padding:0 0 16px;"><div style="background:{C["card"]};border:1px solid {C["line"]};'
+                f'border-top:3px solid {color};border-radius:16px;padding:20px;">'
+                f'<div style="font-size:12px;color:{color};font-weight:800;letter-spacing:1.2px;text-transform:uppercase;'
+                f'margin-bottom:14px;">{title}</div>{inner}</div></td></tr>')
+
+    # --- hlavička ---
+    header = (f'<tr><td style="padding:0 0 16px;"><div style="background:#0c4a6e;'
+              f'background-image:linear-gradient(135deg,#0ea5e9,#1e3a8a);border-radius:16px;padding:22px 24px;">'
+              f'<span style="background:#ffffff;color:#0c4a6e;font-weight:900;border-radius:10px;padding:8px 11px;font-size:13px;">NHL</span>'
+              f'<span style="font-size:24px;font-weight:800;color:#ffffff;margin-left:12px;">NHL Agent</span>'
+              f'<div style="font-size:13px;color:#dbeafe;margin-top:10px;">Report za noc na {e(d)}</div></div></td></tr>')
+
+    # --- dlaždice ---
+    def tile(v, label):
+        return (f'<td align="center" style="padding:4px;width:33%;"><div style="background:{C["bg"]};border:1px solid {C["line"]};'
+                f'border-radius:12px;padding:14px 6px;"><div style="font-size:28px;font-weight:800;color:{C["acc"]};">{e(v)}</div>'
+                f'<div style="font-size:10px;color:{C["mute"]};text-transform:uppercase;letter-spacing:.7px;margin-top:3px;">{e(label)}</div>'
+                f'</div></td>')
+
+    tiles = (f'<table width="100%" style="border-collapse:collapse;margin-bottom:14px;"><tr>'
+             f'{tile(stats["games"], "zápasů")}{tile(stats["goals"], "gólů")}{tile(stats["points"], "bodů Čechů a Slováků")}'
+             f'</tr></table>')
+
+    ps = "".join(f'<p style="margin:0 0 10px;line-height:1.6;color:{C["text"]};font-size:15px;">{fmt(p)}</p>' for p in paras)
+    fs = "".join(
+        f'<div style="padding:9px 12px;background:{C["bg"]};border-left:3px solid {C["gold"]};border-radius:8px;'
+        f'margin-bottom:8px;font-size:14px;line-height:1.5;color:{C["text"]};">{fmt(f)}</div>' for f in facts)
+    facts_html = (f'<div style="font-size:11px;color:{C["gold"]};font-weight:800;letter-spacing:1px;text-transform:uppercase;'
+                  f'margin:14px 0 8px;">Zajímavosti noci</div>{fs}') if facts else ""
+    summary = sec(f"Co se stalo", tiles + ps + facts_html)
+
+    # --- tabulka výkonů (beze změny) ---
     def th(t, al="center"):
         return f'<th style="text-align:{al};padding:8px 6px;font-size:11px;color:{C["mute"]};border-bottom:1px solid {C["line"]};">{t}</th>'
 
@@ -310,37 +433,54 @@ def to_html(game_date, paras, cards, rows, compact, upcoming):
     table = (f'<table width="100%" style="border-collapse:collapse;"><tr>{th("Hráč","left")}{th("Národ","left")}{th("Zápas","left")}'
              f'{th("Výsledek")}{th("G")}{th("A")}{th("B")}{th("+/-")}{th("Střely / zákroky")}{th("Čas")}{th("Sezóna")}</tr>{body}</table>') if rows \
         else f'<p style="color:{C["mute"]};">Žádný Čech ani Slovák v noci nenastoupil.</p>'
+    perf = sec(f"Výkony Čechů a Slováků · {e(d)}", f'<div style="overflow-x:auto;">{table}</div>')
 
+    # --- dnes hrají ---
     if upcoming:
         ucards = ""
         for u in upcoming:
-            names = "<br>".join(
-                f'{FLAG.get(x["nat"], "")} {e(x["name"])} <span style="color:{C["mute"]};">({e(x["team"])}{", brankář" if x["goalie"] else ""})</span>'
+            lines = "".join(
+                f'<div style="font-size:13px;color:{C["text"]};padding:4px 0;">{FLAG.get(x["nat"], "")} <b>{e(x["name"])}</b> '
+                f'<span style="color:{C["mute"]};">· {e(tn(x["team"]))}{" · brankář" if x["goalie"] else ""}</span></div>'
                 for x in u["players"])
-            ucards += (f'<div style="background:{C["bg"]};border:1px solid {C["line"]};border-radius:10px;padding:12px;margin-bottom:10px;">'
-                       f'<div style="font-size:15px;font-weight:700;color:{C["text"]};">{e(u["away"])} @ {e(u["home"])}</div>'
-                       f'<div style="font-size:13px;color:{C["text"]};line-height:1.7;margin-top:6px;">{names}</div></div>')
+            ucards += (f'<div style="background:{C["bg"]};border:1px solid {C["line"]};border-radius:12px;padding:14px;margin-bottom:10px;">'
+                       f'<div style="font-size:15px;font-weight:700;color:{C["text"]};">{e(tn(u["away"]))} '
+                       f'<span style="color:{C["mute"]};font-weight:400;">@</span> {e(tn(u["home"]))}</div>'
+                       f'<div style="margin-top:8px;border-top:1px solid {C["line"]};padding-top:6px;">{lines}</div></div>')
         upcoming_html = ucards + f'<div style="font-size:11px;color:{C["mute"]};">Podle soupisek týmů, nastoupení není jisté (zranění, vynechání).</div>'
     else:
         upcoming_html = f'<p style="color:{C["mute"]};margin:0;">Dnes žádný Čech ani Slovák nehraje.</p>'
+    today = sec("Dnes hrají", upcoming_html, C["win"])
 
-    def sec(title, inner):
-        return (f'<tr><td style="padding:0 0 16px;"><div style="background:{C["card"]};border:1px solid {C["line"]};border-radius:14px;padding:20px;">'
-                f'<div style="font-size:12px;color:{C["acc"]};font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:14px;">{title}</div>{inner}</div></td></tr>')
+    # --- noční program ---
+    def team_row(abbr, score, win):
+        nc = C["text"] if win else C["mute"]
+        sc = C["win"] if win else C["mute"]
+        return (f'<tr><td style="font-size:14px;font-weight:{700 if win else 500};color:{nc};padding:3px 0;">{e(tn(abbr))}</td>'
+                f'<td align="right" style="font-size:20px;font-weight:800;color:{sc};padding:3px 0;">{e(score)}</td></tr>')
 
-    d = cz_date(game_date)
+    cs = []
+    for c in cards:
+        a, h = num(c["as"]), num(c["hs"])
+        a_win = c["done"] and a is not None and h is not None and a > h
+        h_win = c["done"] and a is not None and h is not None and h > a
+        cs.append(
+            f'<td style="padding:6px;vertical-align:top;width:50%;"><div style="background:{C["bg"]};border:1px solid {C["line"]};border-radius:12px;padding:14px;">'
+            f'<div style="font-size:11px;color:{C["win"]};text-transform:uppercase;font-weight:700;">{e(c["status"])}</div>'
+            f'<div style="font-size:11px;color:{C["mute"]};margin-bottom:8px;">{e(c["time"])} (Praha)</div>'
+            f'<table width="100%" style="border-collapse:collapse;">{team_row(c["away"], c["as"], a_win)}{team_row(c["home"], c["hs"], h_win)}</table>'
+            f'<div style="font-size:12px;color:{C["mute"]};margin-top:8px;border-top:1px solid {C["line"]};padding-top:8px;">{e(c["scorers"])}</div></div></td>')
+    grid = ""
+    for i in range(0, len(cs), 2):
+        grid += "<tr>" + cs[i] + (cs[i + 1] if i + 1 < len(cs) else '<td style="width:50%;"></td>') + "</tr>"
+    night = sec("Noční program NHL", f'<table width="100%" style="border-collapse:collapse;">{grid}</table>', "#a78bfa")
+
     return (f'<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>'
             f'<body style="margin:0;background:{C["bg"]};font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">'
             f'<table width="100%" style="background:{C["bg"]};"><tr><td align="center" style="padding:24px 12px;">'
             f'<table width="100%" style="max-width:720px;border-collapse:collapse;">'
-            f'<tr><td style="padding:0 0 18px;"><span style="background:{C["acc"]};color:{C["bg"]};font-weight:900;border-radius:10px;padding:10px 12px;">NHL</span>'
-            f'<span style="font-size:20px;font-weight:800;color:{C["text"]};margin-left:12px;">NHL Agent</span></td></tr>'
-            + sec(f"Ranní zpráva — noc na {e(d)}", ps)
-            + sec("Noční program NHL", f'<table width="100%" style="border-collapse:collapse;">{grid}</table>')
-            + sec(f"Výkony Čechů a Slováků · {e(d)}", f'<div style="overflow-x:auto;">{table}</div>')
-            + sec("Dnes hrají", upcoming_html)
-            + sec("Rychlý přehled", f'<pre style="margin:0;white-space:pre-wrap;font-family:inherit;font-size:14px;line-height:1.55;color:{C["text"]};">{e(compact)}</pre>')
-            + f'<tr><td style="font-size:11px;color:{C["mute"]};text-align:center;">Data: veřejné NHL API · odesláno automaticky v 06:30 (Europe/Prague)</td></tr>'
+            + header + summary + perf + today + night
+            + f'<tr><td style="font-size:11px;color:{C["mute"]};text-align:center;padding-top:4px;">Data: veřejné NHL API · odesláno automaticky v 06:30 (Europe/Prague)</td></tr>'
             f'</table></td></tr></table></body></html>')
 
 
@@ -379,9 +519,15 @@ def main():
         return
 
     upcoming = upcoming_players(next_date, rs, rg)
+    paras, facts = article(game_date, games, cards, rows, not_played)
+    stats = {
+        "games": len(games),
+        "goals": sum((g["awayTeam"].get("score") or 0) + (g["homeTeam"].get("score") or 0) for g in games),
+        "points": sum(r["b"] for r in rows if not r["goalie"] and isinstance(r["b"], int)),
+    }
     compact = compact_text(game_date, rows, upcoming)
-    html_body = to_html(game_date, article(game_date, cards, rows, not_played), cards, rows, compact, upcoming)
-    subject = f"🏒 NHL ranní report — {cz_date(game_date)}"
+    html_body = to_html(game_date, paras, facts, cards, rows, upcoming, stats)
+    subject = f"🏒 NHL report — {cz_date(game_date)}"
     if os.environ.get("DRY_RUN") == "1":
         open("preview.html", "w", encoding="utf-8").write(html_body)
         print(compact)
