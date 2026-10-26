@@ -19,5 +19,5 @@ jobs:
         env:
           FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
