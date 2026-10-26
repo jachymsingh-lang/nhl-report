@@ -116,6 +116,10 @@ def bod(n):
     return "bod" if n == 1 else ("body" if 2 <= n <= 4 else "bodů")
 
 
+def hrac(n):
+    return "hráč" if n == 1 else ("hráči" if 2 <= n <= 4 else "hráčů")
+
+
 def season_maps(game_date):
     """Sezónní statistiky Čechů a Slováků (součet přes všechny týmy, za které hráč hrál)."""
     sid = season_id(game_date)
@@ -538,6 +542,20 @@ def compact_text(game_date, rows, upcoming):
 # ----------------------------- VZHLED E-MAILU -----------------------------
 
 
+def preheader_text(stats, rows, upcoming):
+    """Krátký text, který Gmail ukáže v seznamu pošty vedle předmětu."""
+    word = "zápas" if stats["games"] == 1 else ("zápasy" if stats["games"] < 5 else "zápasů")
+    parts = [f'{stats["games"]} {word}', f'{stats["goals"]} {gol(stats["goals"])}']
+    scorers = [r for r in rows if not r["goalie"] and isinstance(r["b"], int) and r["b"] > 0]
+    if scorers:
+        b = scorers[0]
+        parts.append(f'Nejlepší: {b["name"]} ({b["b"]} {bod(b["b"])})')
+    n = sum(len(u["players"]) for u in upcoming)
+    if n:
+        parts.append(f"Dnes: {n} {hrac(n)} z Česka a Slovenska")
+    return " · ".join(parts)
+
+
 def to_html(game_date, paras, facts, cards, rows, upcoming, stats, lb, wk):
     e = lambda s: _html.escape(str(s if s is not None else ""))
     C = dict(bg="#0b1220", card="#111a2e", line="#1f2b45", text="#e6ecf5", mute="#8a9bb8",
@@ -547,6 +565,11 @@ def to_html(game_date, paras, facts, cards, rows, upcoming, stats, lb, wk):
         return re.sub(r"\*\*(.+?)\*\*", r'<b style="color:#ffffff;">\1</b>', e(t))
 
     d = cz_date(game_date)
+
+    # skrytý text pro náhled v seznamu pošty (po otevření zprávy není vidět)
+    preheader = (f'<div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;'
+                 f'color:{C["bg"]};">{e(preheader_text(stats, rows, upcoming))}'
+                 + "&#847;&zwnj;&nbsp;" * 60 + '</div>')
 
     def sec(title, inner, color=None):
         color = color or C["acc"]
@@ -691,6 +714,7 @@ def to_html(game_date, paras, facts, cards, rows, upcoming, stats, lb, wk):
 
     return (f'<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>'
             f'<body style="margin:0;background:{C["bg"]};font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">'
+            + preheader +
             f'<table width="100%" style="background:{C["bg"]};"><tr><td align="center" style="padding:24px 12px;">'
             f'<table width="100%" style="max-width:720px;border-collapse:collapse;">'
             + header + summary + perf + board + week + today + night
