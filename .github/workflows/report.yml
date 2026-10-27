@@ -2,8 +2,7 @@ name: NHL ranní report
 
 on:
   schedule:
-    - cron: "30 4 * * *"
-    - cron: "30 5 * * *"
+    - cron: "30 5 * * *"   # 6:30 našeho zimního času (UTC+1)
   workflow_dispatch:
     inputs:
       weekly:
@@ -22,7 +21,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python nhl_report.py
         env:
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+          FORCE: "1"
           WEEKLY: ${{ inputs.weekly && '1' || '' }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
