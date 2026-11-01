@@ -178,6 +178,19 @@ def goalie_rating(p):
     return round(max(1.0, min(10.0, val)), 1)
 
 
+def faceoff_str(p, fo):
+    """Úspěšnost na buli u centrů, např. '54 % (14/26)'. Ostatním a bez dat '–'."""
+    if p.get("positionCode") != "C" or not fo:
+        return "–"
+    total = fo.get("totalFaceoffs") or 0
+    pct = fo.get("faceoffWinPct")
+    if not total or pct is None:
+        return "–"
+    pct = pct / 100 if pct > 1 else pct
+    won = round(pct * total)
+    return f"{round(pct * 100)} % ({won}/{total})"
+
+
 def index_rt(rt_rows):
     return {(r.get("playerId"), r.get("gameId")): r for r in rt_rows}
 
@@ -281,7 +294,12 @@ def fetch(game_date):
     except (requests.RequestException, ValueError) as exc:
         print(f"[WARN] Hity a další statistiky se nepodařilo načíst: {exc}", file=sys.stderr)
         rt = []
-    return score, skaters, goalies, rs, rg, ss, sg, rt
+    try:  # úspěšnost na buli
+        fo = get_json(f"{STATS_URL}/skater/faceoffpercentages", {**base, "cayenneExp": day}).get("data", [])
+    except (requests.RequestException, ValueError) as exc:
+        print(f"[WARN] Buly se nepodařilo načíst: {exc}", file=sys.stderr)
+        fo = []
+    return score, skaters, goalies, rs, rg, ss, sg, rt, fo
 
 
 def fetch_history(game_date, report="skater/summary"):
@@ -316,7 +334,7 @@ def scratch_names(games):
     return names
 
 
-def build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm):
+def build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm, fom):
     nat = {}
     for p in rs + rg:
         nat[p["playerId"]] = {"code": p.get("nationalityCode"), "team": p.get("currentTeamAbbrev")}
@@ -359,12 +377,14 @@ def build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm):
         opp, res, win, home = result_for(p.get("gameId"), p.get("teamAbbrev"))
         code = (nat.get(p["playerId"]) or {}).get("code") or "CZE"
         rtr = rtm.get((p.get("playerId"), p.get("gameId")))
+        fof = fom.get((p.get("playerId"), p.get("gameId")))
         rows.append({
             "name": nm(p["skaterFullName"]), "nat": code, "goalie": False,
             "team": p["teamAbbrev"], "opp": opp, "res": res, "win": win,
             "g": p["goals"], "a": p["assists"], "b": p["points"], "pm": pm(p.get("plusMinus")),
             "shots": str(p.get("shots", 0)),
             "hits": str(rtr.get("hits") or 0) if rtr else "–",
+            "faceoffs": faceoff_str(p, fof),
             "toi": toi(p.get("timeOnIcePerGame")),
             "rating": skater_rating(p, rtr),
             "season": season_str(p["playerId"], False, ss, sg),
@@ -379,7 +399,7 @@ def build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm):
             "name": nm(p["goalieFullName"]), "nat": code, "goalie": True,
             "team": p["teamAbbrev"], "opp": opp, "res": res, "win": win,
             "g": "–", "a": "–", "b": "–", "pm": "–",
-            "shots": f"{p['saves']}/{sa} zák. ({pct} %)", "hits": "–", "toi": toi(p.get("timeOnIce")),
+            "shots": f"{p['saves']}/{sa} zák. ({pct} %)", "hits": "–", "faceoffs": "–", "toi": toi(p.get("timeOnIce")),
             "rating": goalie_rating(p),
             "season": season_str(p["playerId"], True, ss, sg),
             "p": p, "pct": pct,
@@ -691,12 +711,6 @@ def facts_for(games):
         facts.append(f'💥 **Největší rozdíl:** {tn(w["abbrev"])} porazil {tn(l["abbrev"])} o **{big_m} {gol(big_m)}**')
     if best_g and best_t >= 8:
         facts.append(f"🎯 **Nejvíc gólů:** {best_g} ({best_t} {gol(best_t)})")
-    for s in shut:
-        facts.append(f"🧱 **Čisté konto:** {s}")
-    for s in ot:
-        facts.append(f"⏱️ **Prodloužení:** {s}")
-    for s in so:
-        facts.append(f"🥅 **Nájezdy:** {s}")
     return facts[:5]
 
 
@@ -732,8 +746,8 @@ def article(game_date, games, cards, rows, not_played):
     rated = [r for r in rows if r["rating"] is not None]
     stars = sorted(rated, key=lambda r: (-r["rating"], -(r["b"] if isinstance(r["b"], int) else 0)))[:3]
     if stars:
-        parts = [f'**{i}.** {r["name"]} ({tn(r["team"])}, {fmt_rating(r["rating"])})' for i, r in enumerate(stars, 1)]
-        out.append("⭐ **Tři hvězdy noci** (podle Puck Ratingu): " + " · ".join(parts) + ".")
+        parts = [f'**{i}.** {r["name"]} ({tn(r["team"])}, **{fmt_rating(r["rating"])}** 🏒)' for i, r in enumerate(stars, 1)]
+        out.append("⭐ **Tři hvězdy noci:** " + " · ".join(parts) + ".")
 
     for r in goalies:
         w = "výhra" if r["win"] else "prohra"
@@ -836,16 +850,16 @@ def to_html(game_date, paras, facts, cards, rows, upcoming, stats, lb, wk, young
         return (f' <span style="color:{C["win"]};">W</span>' if r["win"]
                 else f' <span style="color:{C["loss"]};">L</span>')
 
-    def rating_color(x):
+    def rating_bg(x):
         if x is None:
-            return C["mute"]
+            return "#475569"
         if x >= 8.5:
-            return C["gold"]
+            return "#2563eb"
         if x >= 7.0:
-            return C["win"]
-        if x < 5.0:
-            return C["loss"]
-        return C["text"]
+            return "#16a34a"
+        if x >= 5.5:
+            return "#d97706"
+        return "#dc2626"
 
     def rating_cell(r):
         rc = r.get("ctx")
@@ -856,7 +870,9 @@ def to_html(game_date, paras, facts, cards, rows, upcoming, stats, lb, wk, young
             elif rc["delta"] <= -1.0:
                 arrow = f' <span style="color:{C["loss"]};">▼</span>'
             sub = f'<br><span style="font-size:10px;color:{C["mute"]};">Ø {fmt_rating(rc["avg"])}</span>'
-        return f'<b style="color:{rating_color(r["rating"])};">{fmt_rating(r["rating"])}</b>{arrow}{sub}'
+        pill = (f'<span style="display:inline-block;background:{rating_bg(r["rating"])};color:#ffffff;font-weight:800;'
+                f'border-radius:8px;padding:2px 8px;">{fmt_rating(r["rating"])}</span>')
+        return f'{pill}{arrow}{sub}'
 
     # --- hlavička ---
     header = (f'<tr><td style="padding:0 0 16px;"><div style="background:#0c4a6e;'
@@ -883,17 +899,13 @@ def to_html(game_date, paras, facts, cards, rows, upcoming, stats, lb, wk, young
         body += ("<tr>" + td(f"<b>{e(r['name'])}</b>" + ("<br><small>brankář</small>" if r["goalie"] else ""), "left")
                  + td(f'{FLAG.get(r["nat"], "")} {e(r["nat"])}', "left") + td(f'{e(r["team"])} vs {e(r["opp"])}', "left")
                  + td(e(r["res"]) + wl_of(r)) + td(e(r["g"])) + td(e(r["a"])) + td(f"<b>{e(r['b'])}</b>") + td(e(r["pm"]))
-                 + td(e(r["shots"])) + td(e(r["hits"])) + td(e(r["toi"])) + td(rating_cell(r))
+                 + td(e(r["shots"])) + td(e(r["hits"])) + td(e(r["faceoffs"])) + td(e(r["toi"])) + td(rating_cell(r))
                  + td(f"<b>{e(r['season'])}</b>") + "</tr>")
-    note = (f'<div style="font-size:11px;color:{C["mute"]};margin-top:10px;line-height:1.5;">'
-            f'Puck Rating = vlastní odhad 1–10 ze statistik (góly, asistence, +/-, střely, hity, bloky, zisky a ztráty puku, '
-            f'trestné minuty, čas na ledě; u brankářů zákroky), není oficiální. '
-            f'Ø = průměr ratingu z předchozích zápasů sezóny, ▲ ▼ = o bod a víc nad/pod ním.</div>')
     table = (f'<table width="100%" style="border-collapse:collapse;"><tr>{th("Hráč","left")}{th("Národ","left")}{th("Zápas","left")}'
-             f'{th("Výsledek")}{th("G")}{th("A")}{th("B")}{th("+/-")}{th("Střely / zákroky")}{th("Hity")}{th("Čas")}'
+             f'{th("Výsledek")}{th("G")}{th("A")}{th("B")}{th("+/-")}{th("Střely / zákroky")}{th("Hity")}{th("Buly")}{th("Čas")}'
              f'{th("Rating")}{th("Sezóna")}</tr>{body}</table>') if rows \
         else f'<p style="color:{C["mute"]};">Žádný Čech ani Slovák v noci nenastoupil.</p>'
-    perf = sec(f"Výkony Čechů a Slováků · {e(d)}", f'<div style="overflow-x:auto;">{table}</div>' + (note if rows else ""))
+    perf = sec(f"Výkony Čechů a Slováků · {e(d)}", f'<div style="overflow-x:auto;">{table}</div>')
 
     # --- mladí hráči a nováčci ---
     young_html = ""
@@ -1049,9 +1061,10 @@ def main():
     next_date = (dt.date.fromisoformat(game_date) + dt.timedelta(days=1)).isoformat()
     sid = season_id(game_date)
 
-    score, skaters, goalies, rs, rg, ss, sg, rt = fetch(game_date)
+    score, skaters, goalies, rs, rg, ss, sg, rt, fo = fetch(game_date)
     rtm = index_rt(rt)
-    games, cards, rows, not_played = build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm)
+    fom = index_rt(fo)
+    games, cards, rows, not_played = build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm, fom)
     if not games:
         print(f"Na {game_date} se nehrálo, e-mail neposílám.")
         return
