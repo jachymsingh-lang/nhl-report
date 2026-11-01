@@ -178,17 +178,39 @@ def goalie_rating(p):
     return round(max(1.0, min(10.0, val)), 1)
 
 
-def faceoff_str(p, fo):
-    """Úspěšnost na buli u centrů, např. '54 % (14/26)'. Ostatním a bez dat '–'."""
-    if p.get("positionCode") != "C" or not fo:
+def faceoff_str(pos, fo):
+    """Úspěšnost na buli, např. '36 % (4/11)'. Bez dat, bez bul nebo u hráče, který na buli prakticky nechodí, '–'."""
+    if not fo:
         return "–"
     total = fo.get("totalFaceoffs") or 0
+    if not total:
+        return "–"
+    if pos not in (None, "C") and total < 5:
+        return "–"
     pct = fo.get("faceoffWinPct")
-    if not total or pct is None:
+    won = fo.get("totalFaceoffWins")
+    if won is None:
+        won = fo.get("faceoffsWon")
+    if pct is None and won is not None:
+        pct = won / total
+    if pct is None:
         return "–"
     pct = pct / 100 if pct > 1 else pct
-    won = round(pct * total)
+    if won is None:
+        won = round(pct * total)
     return f"{round(pct * 100)} % ({won}/{total})"
+
+
+def lookup(m, p):
+    """Najde řádek hráče v mapě (playerId, gameId); když report gameId nevrací, stačí playerId (data jsou z jednoho dne)."""
+    pid, gid = p.get("playerId"), p.get("gameId")
+    hit = m.get((pid, gid)) or m.get((pid, None))
+    if hit is not None:
+        return hit
+    for (k_pid, _), v in m.items():
+        if k_pid == pid:
+            return v
+    return None
 
 
 def index_rt(rt_rows):
@@ -338,6 +360,7 @@ def build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm, fom):
     nat = {}
     for p in rs + rg:
         nat[p["playerId"]] = {"code": p.get("nationalityCode"), "team": p.get("currentTeamAbbrev")}
+    pos_of = {p["playerId"]: p.get("positionCode") for p in rs}
 
     games = [g for g in score.get("games", []) if g.get("gameDate") == game_date]
     by_id, cards = {}, []
@@ -376,15 +399,18 @@ def build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm, fom):
     for p in skaters:
         opp, res, win, home = result_for(p.get("gameId"), p.get("teamAbbrev"))
         code = (nat.get(p["playerId"]) or {}).get("code") or "CZE"
-        rtr = rtm.get((p.get("playerId"), p.get("gameId")))
-        fof = fom.get((p.get("playerId"), p.get("gameId")))
+        rtr = lookup(rtm, p)
+        fof = lookup(fom, p)
+        pos = p.get("positionCode") or pos_of.get(p["playerId"])
+        if pos and not p.get("positionCode"):
+            p["positionCode"] = pos
         rows.append({
             "name": nm(p["skaterFullName"]), "nat": code, "goalie": False,
             "team": p["teamAbbrev"], "opp": opp, "res": res, "win": win,
             "g": p["goals"], "a": p["assists"], "b": p["points"], "pm": pm(p.get("plusMinus")),
             "shots": str(p.get("shots", 0)),
             "hits": str(rtr.get("hits") or 0) if rtr else "–",
-            "faceoffs": faceoff_str(p, fof),
+            "faceoffs": faceoff_str(pos, fof), "pos": pos,
             "toi": toi(p.get("timeOnIcePerGame")),
             "rating": skater_rating(p, rtr),
             "season": season_str(p["playerId"], False, ss, sg),
@@ -399,7 +425,7 @@ def build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm, fom):
             "name": nm(p["goalieFullName"]), "nat": code, "goalie": True,
             "team": p["teamAbbrev"], "opp": opp, "res": res, "win": win,
             "g": "–", "a": "–", "b": "–", "pm": "–",
-            "shots": f"{p['saves']}/{sa} zák. ({pct} %)", "hits": "–", "faceoffs": "–", "toi": toi(p.get("timeOnIce")),
+            "shots": f"{p['saves']}/{sa} zák. ({pct} %)", "hits": "–", "faceoffs": "–", "pos": "G", "toi": toi(p.get("timeOnIce")),
             "rating": goalie_rating(p),
             "season": season_str(p["playerId"], True, ss, sg),
             "p": p, "pct": pct,
@@ -425,6 +451,28 @@ def build(game_date, score, skaters, goalies, rs, rg, ss, sg, rtm, fom):
         }
     not_played = sorted(absent.values(), key=lambda x: (x["team"], x["name"].lower()))
     return games, cards, rows, not_played
+
+
+def faceoffs_from_boxscore(rows):
+    """Záloha: centrům bez dat o bulech doplní aspoň procento úspěšnosti z boxscore zápasu."""
+    need = {}
+    for r in rows:
+        if r["goalie"] or r["faceoffs"] != "–" or r.get("pos") != "C":
+            continue
+        need.setdefault(r["p"].get("gameId"), []).append(r)
+    for gid, rws in need.items():
+        try:
+            bx = get_json(f"https://api-web.nhle.com/v1/gamecenter/{gid}/boxscore")
+        except (requests.RequestException, ValueError):
+            continue
+        pcts = {}
+        for side in ("awayTeam", "homeTeam"):
+            for pl in ((bx.get("playerByGameStats") or {}).get(side) or {}).get("forwards") or []:
+                pcts[pl.get("playerId")] = pl.get("faceoffWinningPctg")
+        for r in rws:
+            pct = pcts.get(r["p"].get("playerId"))
+            if pct:
+                r["faceoffs"] = f"{round(pct * 100 if pct <= 1 else pct)} %"
 
 
 def young_players(rows, bios, game_date, sid):
@@ -1068,6 +1116,10 @@ def main():
     if not games:
         print(f"Na {game_date} se nehrálo, e-mail neposílám.")
         return
+    centers = [r for r in rows if r.get("pos") == "C"]
+    missing = [r["name"] for r in centers if r["faceoffs"] == "–"]
+    print(f"[INFO] Buly: report vrátil {len(fo)} řádků, centrů {len(centers)}, bez dat o bulech {len(missing)} {missing}")
+    faceoffs_from_boxscore(rows)
 
     info = {
         p["playerId"]: {
