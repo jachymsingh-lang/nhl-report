@@ -16,6 +16,7 @@ RIGHT_RAIL_URL = "https://api-web.nhle.com/v1/gamecenter/{}/right-rail"
 STATS_URL = "https://api.nhle.com/stats/rest/en"
 NAT = '("CZE","SVK")'
 YOUNG_MAX_AGE = 22  # do tohoto věku (včetně) jde hráč do sekce "Mladí hráči a nováčci"
+SEND_HOUR, SEND_MINUTE = 6, 0  # kdy má e-mail dorazit (pražský čas)
 
 CZ = {
     'Martin Necas': 'Martin Nečas', 'David Pastrnak': 'David Pastrňák', 'Lukas Dostal': 'Lukáš Dostál',
@@ -1076,25 +1077,37 @@ def to_html(game_date, paras, facts, cards, rows, upcoming, stats, lb, wk, young
             f'<table width="100%" style="background:{C["bg"]};"><tr><td align="center" style="padding:24px 12px;">'
             f'<table width="100%" style="max-width:720px;border-collapse:collapse;">'
             + header + summary + perf + young_html + absent_html + board + week + today + night
-            + f'<tr><td style="font-size:11px;color:{C["mute"]};text-align:center;padding-top:4px;">Data: veřejné NHL API · odesláno automaticky v 06:30 (Europe/Prague)</td></tr>'
+            + f'<tr><td style="font-size:11px;color:{C["mute"]};text-align:center;padding-top:4px;">Data: veřejné NHL API · odesláno automaticky v 06:00 (Europe/Prague)</td></tr>'
             f'</table></td></tr></table></body></html>')
 
 
-def send_mail(subject, html_body, plain):
+def scheduled_time(now):
+    """Dnešní čas doručení v ISO 8601 (pražský čas), nebo None, pokud už je skoro po něm."""
+    target = now.replace(hour=SEND_HOUR, minute=SEND_MINUTE, second=0, microsecond=0)
+    if target - now < dt.timedelta(minutes=2):
+        return None
+    return target.isoformat()
+
+
+def send_mail(subject, html_body, plain, send_at=None):
     to = os.environ.get("MAIL_TO") or os.environ["GMAIL_USER"]
     key = os.environ["RESEND_API_KEY"].strip()
-    r = requests.post(
-        "https://api.resend.com/emails",
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "from": "NHL Agent <onboarding@resend.dev>",
-            "to": [to.strip()],
-            "subject": subject,
-            "html": html_body,
-            "text": plain,
-        },
-        timeout=30,
-    )
+    url = "https://api.resend.com/emails"
+    headers = {"Authorization": f"Bearer {key}"}
+    payload = {
+        "from": "NHL Agent <onboarding@resend.dev>",
+        "to": [to.strip()],
+        "subject": subject,
+        "html": html_body,
+        "text": plain,
+    }
+    if send_at:
+        payload["scheduled_at"] = send_at
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    if not r.ok and send_at:
+        print(f"[WARN] Plánované odeslání selhalo ({r.text}), posílám hned.", file=sys.stderr)
+        payload.pop("scheduled_at")
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
     if not r.ok:
         print(r.text, file=sys.stderr)
     r.raise_for_status()
@@ -1171,8 +1184,10 @@ def main():
         print(compact)
         print("Náhled uložen do preview.html")
         return
-    send_mail(subject, html_body, compact)
-    print("E-mail odeslán.")
+    # plánované odeslání jen u automatického spuštění; čas se bere až teď, po sestavení reportu
+    send_at = scheduled_time(dt.datetime.now(PRAGUE)) if os.environ.get("SCHEDULED_SEND") == "1" else None
+    send_mail(subject, html_body, compact, send_at)
+    print(f"E-mail naplánován na {send_at}." if send_at else "E-mail odeslán.")
 
 
 if __name__ == "__main__":
