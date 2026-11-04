@@ -2,7 +2,7 @@ name: NHL ranní report
 
 on:
   schedule:
-    - cron: "30 5 * * *"   # 6:30 našeho zimního času (UTC+1)
+    - cron: "35 4 * * *"   # 5:35 našeho zimního času (UTC+1), e-mail se odešle v 6:00 přes Resend
   workflow_dispatch:
     inputs:
       weekly:
@@ -22,6 +22,7 @@ jobs:
       - run: python nhl_report.py
         env:
           FORCE: "1"
+          SCHEDULED_SEND: ${{ github.event_name == 'schedule' && '1' || '' }}
           WEEKLY: ${{ inputs.weekly && '1' || '' }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
