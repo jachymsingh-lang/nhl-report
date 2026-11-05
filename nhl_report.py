@@ -5,6 +5,7 @@ import html as _html
 import os
 import re
 import sys
+import time
 import unicodedata
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,9 @@ STATS_URL = "https://api.nhle.com/stats/rest/en"
 NAT = '("CZE","SVK")'
 YOUNG_MAX_AGE = 22  # do tohoto věku (včetně) jde hráč do sekce "Mladí hráči a nováčci"
 SEND_HOUR, SEND_MINUTE = 6, 0  # kdy má e-mail dorazit (pražský čas)
+WAIT_MARGIN_MIN = 4     # skript přestane čekat na data tolik minut před časem doručení
+POLL_SECONDS = 60       # jak často se ptá NHL, jestli už jsou zápasy dohrané a statistiky venku
+STATS_GRACE_MIN = 8     # po dohrání všech zápasů tolik minut čeká na statistiky, pak pošle, co má
 
 CZ = {
     'Martin Necas': 'Martin Nečas', 'David Pastrnak': 'David Pastrňák', 'Lukas Dostal': 'Lukáš Dostál',
@@ -801,6 +805,10 @@ def article(game_date, games, cards, rows, not_played):
     for r in goalies:
         w = "výhra" if r["win"] else "prohra"
         out.append(f'Brankář **{r["name"]}** ({tn(r["team"])}): {r["shots"]}, {w}.')
+    live = [g for g in games if g.get("gameState") not in ("OFF", "FINAL")]
+    if live:
+        names = ", ".join(f'{tn(g["awayTeam"]["abbrev"])} – {tn(g["homeTeam"]["abbrev"])}' for g in live)
+        out.append(f"⏳ **Ještě neskončil:** {names}. Hráči z tohoto zápasu zatím v reportu nejsou.")
     k = len(not_played)
     if k:
         if k == 1:
@@ -1081,6 +1089,57 @@ def to_html(game_date, paras, facts, cards, rows, upcoming, stats, lb, wk, young
             f'</table></td></tr></table></body></html>')
 
 
+def wait_for_data(game_date, deadline):
+    """Počká, až budou dohrané zápasy týmů s Čechy a Slováky a NHL zveřejní jejich statistiky.
+    Skončí nejpozději v `deadline`; pak se pošle to, co je k dispozici."""
+    cz_teams = set()
+    try:
+        bio = f"seasonId={season_id(game_date)} and nationalityCode in {NAT}"
+        bbase = {"isAggregate": "false", "isGame": "false", "limit": "200", "cayenneExp": bio}
+        for rep in ("skater/bios", "goalie/bios"):
+            for p in get_json(f"{STATS_URL}/{rep}", bbase).get("data", []):
+                if p.get("currentTeamAbbrev"):
+                    cz_teams.add(p["currentTeamAbbrev"])
+    except (requests.RequestException, ValueError) as exc:
+        print(f"[WARN] Čekání přeskočeno, soupisky se nepodařilo načíst: {exc}", file=sys.stderr)
+        return
+
+    day = f'gameDate>="{game_date}" and gameDate<="{game_date}" and nationalityCode in {NAT}'
+    base = {"isAggregate": "false", "isGame": "true", "limit": "100", "cayenneExp": day}
+    final_since = None
+    while True:
+        try:
+            score = get_json(SCORE_URL + game_date)
+            games = [g for g in score.get("games", [])
+                     if g.get("gameDate") == game_date
+                     and (g["awayTeam"]["abbrev"] in cz_teams or g["homeTeam"]["abbrev"] in cz_teams)]
+            if not games:
+                return
+            now = dt.datetime.now(PRAGUE)
+            if all(g.get("gameState") in ("OFF", "FINAL") for g in games):
+                if final_since is None:
+                    final_since = now
+                have = set()
+                for rep in ("skater/summary", "goalie/summary"):
+                    for p in get_json(f"{STATS_URL}/{rep}", base).get("data", []):
+                        have.add(p.get("gameId"))
+                if all(g["id"] in have for g in games):
+                    print("[INFO] Všechny zápasy jsou dohrané a statistiky jsou venku.")
+                    return
+                if now - final_since >= dt.timedelta(minutes=STATS_GRACE_MIN):
+                    print("[INFO] Zápasy jsou dohrané, ale statistiky některých chybí; posílám, co je.")
+                    return
+            else:
+                final_since = None
+        except (requests.RequestException, ValueError, KeyError) as exc:
+            print(f"[WARN] Kontrola dat selhala: {exc}", file=sys.stderr)
+        if dt.datetime.now(PRAGUE) + dt.timedelta(seconds=POLL_SECONDS) > deadline:
+            print("[INFO] Čas na čekání vypršel, posílám, co je k dispozici.")
+            return
+        print("[INFO] Čekám na dohrání zápasů / statistiky...")
+        time.sleep(POLL_SECONDS)
+
+
 def scheduled_time(now):
     """Dnešní čas doručení v ISO 8601 (pražský čas), nebo None, pokud už je skoro po něm."""
     target = now.replace(hour=SEND_HOUR, minute=SEND_MINUTE, second=0, microsecond=0)
@@ -1121,6 +1180,11 @@ def main():
     game_date = os.environ.get("DATE") or (now - dt.timedelta(days=1)).strftime("%Y-%m-%d")
     next_date = (dt.date.fromisoformat(game_date) + dt.timedelta(days=1)).isoformat()
     sid = season_id(game_date)
+
+    # u automatického spuštění počkáme na pozdní zápasy a zveřejnění statistik (max do času doručení minus rezerva)
+    if os.environ.get("SCHEDULED_SEND") == "1" and not os.environ.get("DATE"):
+        target = now.replace(hour=SEND_HOUR, minute=SEND_MINUTE, second=0, microsecond=0)
+        wait_for_data(game_date, target - dt.timedelta(minutes=WAIT_MARGIN_MIN))
 
     score, skaters, goalies, rs, rg, ss, sg, rt, fo = fetch(game_date)
     rtm = index_rt(rt)
