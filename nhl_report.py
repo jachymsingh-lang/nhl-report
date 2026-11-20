@@ -1148,11 +1148,15 @@ def scheduled_time(now):
     return target.isoformat()
 
 
-def send_mail(subject, html_body, plain, send_at=None):
+def send_mail(subject, html_body, plain, send_at=None, idem=None):
+    """Odešle e-mail přes Resend. S `idem` (Idempotency-Key) Resend do 24 h nepošle stejný report podruhé.
+    Vrací True, když se e-mail odeslal/naplánoval, False, když už pro tento klíč existuje."""
     to = os.environ.get("MAIL_TO") or os.environ["GMAIL_USER"]
     key = os.environ["RESEND_API_KEY"].strip()
     url = "https://api.resend.com/emails"
     headers = {"Authorization": f"Bearer {key}"}
+    if idem:
+        headers["Idempotency-Key"] = idem
     payload = {
         "from": "NHL Agent <onboarding@resend.dev>",
         "to": [to.strip()],
@@ -1163,13 +1167,22 @@ def send_mail(subject, html_body, plain, send_at=None):
     if send_at:
         payload["scheduled_at"] = send_at
     r = requests.post(url, headers=headers, json=payload, timeout=30)
+    if r.status_code == 409:
+        print(f"[INFO] Report s klíčem {idem} už byl odeslán nebo naplánován ({r.text}), neposílám znovu.")
+        return False
     if not r.ok and send_at:
         print(f"[WARN] Plánované odeslání selhalo ({r.text}), posílám hned.", file=sys.stderr)
         payload.pop("scheduled_at")
+        if idem:  # jiný payload = jiný klíč, aby odeslání hned neskončilo konfliktem
+            headers["Idempotency-Key"] = f"{idem}-now"
         r = requests.post(url, headers=headers, json=payload, timeout=30)
+        if r.status_code == 409:
+            print(f"[INFO] Report už byl odeslán ({r.text}), neposílám znovu.")
+            return False
     if not r.ok:
         print(r.text, file=sys.stderr)
     r.raise_for_status()
+    return True
 
 
 def main():
@@ -1249,9 +1262,15 @@ def main():
         print("Náhled uložen do preview.html")
         return
     # plánované odeslání jen u automatického spuštění; čas se bere až teď, po sestavení reportu
-    send_at = scheduled_time(dt.datetime.now(PRAGUE)) if os.environ.get("SCHEDULED_SEND") == "1" else None
-    send_mail(subject, html_body, compact, send_at)
-    print(f"E-mail naplánován na {send_at}." if send_at else "E-mail odeslán.")
+    scheduled = os.environ.get("SCHEDULED_SEND") == "1"
+    send_at = scheduled_time(dt.datetime.now(PRAGUE)) if scheduled else None
+    # klíč proti duplicitám jen u automatického spuštění (ruční testy se vždy odešlou)
+    idem = f"nhl-report-{game_date}" if scheduled else None
+    sent = send_mail(subject, html_body, compact, send_at, idem)
+    if not sent:
+        print("Report pro tento den už byl dříve odeslán nebo naplánován, nic dalšího se neposílá.")
+    else:
+        print(f"E-mail naplánován na {send_at}." if send_at else "E-mail odeslán.")
 
 
 if __name__ == "__main__":
