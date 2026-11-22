@@ -2,27 +2,37 @@ name: NHL ranní report
 
 on:
   schedule:
-    - cron: "35 4 * * *"   # 5:35 našeho zimního času (UTC+1), e-mail se odešle v 6:00 přes Resend
+    - cron: "10 3 * * *"   # záloha, hlavní spouštěč je externí
   workflow_dispatch:
     inputs:
       weekly:
         description: "Přidat týdenní souhrn"
         type: boolean
         default: false
+      scheduled:
+        description: "Automatický režim (čekání na zápasy + plánované odeslání)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: nhl-report
+  cancel-in-progress: false
 
 jobs:
   send:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
       - run: pip install -r requirements.txt
       - run: python nhl_report.py
         env:
           FORCE: "1"
-          SCHEDULED_SEND: ${{ github.event_name == 'schedule' && '1' || '' }}
+          SCHEDULED_SEND: ${{ (github.event_name == 'schedule' || inputs.scheduled) && '1' || '' }}
           WEEKLY: ${{ inputs.weekly && '1' || '' }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
